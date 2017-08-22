@@ -1,5 +1,6 @@
 # todo-queue
-queue work todo in redis and handle it in the same process. keep work safe from process restarts/crashes
+queue work to do in redis, and handle it in the same process. 
+keep work safe from process restarts/crashes
 
 
 ```
@@ -8,8 +9,15 @@ var todoQueue = require('todo-queue')
 var queue = todoQueue({
   prefix:"foo",
   start:true,
-},function(work,done){
+},function(job,done){
+  //job.name
+  //job.data
 
+  // do the job here
+
+  done()
 })
+
+queue.add('name',{a:1})
 
 ```
