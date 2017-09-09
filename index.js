@@ -39,6 +39,7 @@ module.exports = function (opts, workfn) {
   var ended = false
 
   var max = opts.max || 10
+  var activeKeys = {}
   var active = 0
 
   // var readOnlyInterval
@@ -114,12 +115,15 @@ module.exports = function (opts, workfn) {
 
       active += jobs.length
       jobs.forEach(function (job) {
+        activeKeys[job.name] = 1
         var next = once(function (err) {
           if (timer) timer.clear()
 
           queue.emit('metric', {name: 'job', value: Date.now() - start})
 
           --active
+          delete activeKeys[job.name]
+
           if (ended && !active) {
             client.quit()
             client = false
@@ -171,6 +175,16 @@ module.exports = function (opts, workfn) {
     var end = active + num
     client.zrange(prefix + ':set', start, end, function (err, data) {
       if (err) return cb(err)
+
+      // because there is a race condition in adding items and removeing them as far as keeping track of the range we have to 
+      // remove errant active items from the list.
+      var filtered = []
+      data.forEach(function(k){
+        if(!activeKeys[k]) filtered.push(k)
+      })
+
+      data = filtered
+
       if (!data.length) {
         return cb(null, [])
       }
