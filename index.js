@@ -28,10 +28,10 @@ module.exports = function (opts, workfn) {
     // reconnecting will beemitted and if sucessful connect will be emitted again
     connected = false
     queue.emit('metric', {name: 'redis-disconnected'})
-  }).on('error', function (err) {
+  }).on('error', function (_err) {
     // without the retry_strategy redis option errors are emitted any time redis goes away
     // but the client will still try to reconnect and process buffered commands.
-
+    queue.emit('log', 'redis error ' + _err)
     queue.emit('metric', {name: 'redis-error'})
     // i make a huge scary assumption here that of there is an error on this object the redis client will eventually fix it.
   })
@@ -47,8 +47,7 @@ module.exports = function (opts, workfn) {
 
   var queue = new EE()
   queue.add = function (name, data, cb) {
-
-    lock(name,function(unlock){
+    lock(name, function (unlock) {
       var multi = client.multi([
         ['zadd', prefix + ':set', Date.now(), name],
         ['hset', prefix + ':data', name, JSON.stringify({name: name, data: data})]
@@ -67,12 +66,11 @@ module.exports = function (opts, workfn) {
     client = false
   }
 
-
-  queue.has = function(name,cb){
-    lock(name,function(unlock){
-      hget(prefix + ':data',function(err,data){
+  queue.has = function (name, cb) {
+    lock(name, function (unlock) {
+      client.hget(prefix + ':data', function (err, data) {
         unlock()
-        cb(err,!!data)
+        cb(err, !!data)
       })
     })
   }
@@ -86,25 +84,25 @@ module.exports = function (opts, workfn) {
     assignWork()
   }
 
-  queue.countFailures = function(cb){
-    queue.client.hlen(prefix+':failed',cb)
+  queue.countFailures = function (cb) {
+    queue.client.hlen(prefix + ':failed', cb)
   }
 
-  queue.getFailures = function(cb){
-    queue.client.hgetall(prefix+':failed',function(err,all){
-      if(err) return cb(err)
+  queue.getFailures = function (cb) {
+    queue.client.hgetall(prefix + ':failed', function (err, all) {
+      if (err) return cb(err)
       var res = []
-      Object.keys(all).forEach(function(k){
+      Object.keys(all).forEach(function (k) {
         var o = json(all[k])
         o._key = k
-        if(o) res.push(o)
+        if (o) res.push(o)
       })
-      cb(false,res)
+      cb(null, res)
     })
   }
 
-  queue.removeFailure = function(key,cb){
-    queue.client.hdel(prefix+':failed',key,cb) 
+  queue.removeFailure = function (key, cb) {
+    queue.client.hdel(prefix + ':failed', key, cb)
   }
 
   queue.client = client
@@ -143,7 +141,7 @@ module.exports = function (opts, workfn) {
 
       var start = Date.now()
 
-      if(!jobs.length) {
+      if (!jobs.length) {
         queue.emit('idle')
       }
 
@@ -151,7 +149,7 @@ module.exports = function (opts, workfn) {
       jobs.forEach(function (job) {
         activeKeys[job.name] = 1
         var timer
-        var next = once(function (err) {
+        var next = once(function () {
           if (timer) timer.clear()
 
           queue.emit('metric', {name: 'job', value: Date.now() - start})
@@ -171,45 +169,43 @@ module.exports = function (opts, workfn) {
         // invalid json
         if (!job) return next()
 
-        lock(job.name,function(unlock){
+        lock(job.name, function (unlock) {
           var timer
           attempts(numAttempts, function (done) {
             if (timer) timer.clear()
             if (opts.timeout) {
               timer = idleTimer(() => {
                 done(new Error('timeout. no callback after ' + opts.timeout + ' ms'))
-              }, opts.timeout)
+              }, timeout)
             }
             workfn(job, function (err, data) {
               done(err, data)
             })
           }, function (err) {
-
             if (timer) timer.clear()
             var multi = client.multi()
             if (err) {
               queue.emit('metric', {name: 'job-failed'})
-              multi.hset(prefix + ':failed', Date.now()+':'+job.name,JSON.stringify(job))
+              multi.hset(prefix + ':failed', Date.now() + ':' + job.name, JSON.stringify(job))
             }
 
             multi.hdel(prefix + ':data', job.name)
             multi.zrem(prefix + ':set', job.name)
-            
 
             var saveJobResult = () => {
               multi.exec(function (err) {
-                if(err) queue.emit('metric', {name: 'redis-command-error'})
+                if (err) queue.emit('metric', {name: 'redis-command-error'})
                 // if we get an error here we may continue to try and process this same set of jobs forever.
                 unlock()
                 next(err)
               })
             }
 
-            if(err) {
-              queue.emit('fail',{job:job,time:Date.now(),error:err})
-              if(opts.failHandler){
-                return opts.failHandler({job:job,time:Date.now(),error:err},function(){
-                  saveJobResult() 
+            if (err) {
+              queue.emit('fail', {job: job, time: Date.now(), error: err})
+              if (opts.failHandler) {
+                return opts.failHandler({job: job, time: Date.now(), error: err}, function () {
+                  saveJobResult()
                 })
               }
             }
@@ -217,7 +213,6 @@ module.exports = function (opts, workfn) {
             saveJobResult()
           })
         })
-
       })
     })
   }
@@ -228,11 +223,11 @@ module.exports = function (opts, workfn) {
     client.zrange(prefix + ':set', start, end, function (err, data) {
       if (err) return cb(err)
 
-      // because there is a race condition in adding items and removing them as far as keeping track of the range we have to 
+      // because there is a race condition in adding items and removing them as far as keeping track of the range we have to
       // remove active items from the list.
       var filtered = []
-      data.forEach(function(k){
-        if(!activeKeys[k]) filtered.push(k)
+      data.forEach(function (k) {
+        if (!activeKeys[k]) filtered.push(k)
       })
 
       data = filtered
@@ -242,6 +237,8 @@ module.exports = function (opts, workfn) {
       }
 
       client.hmget(prefix + ':data', data, function (err, jobs) {
+        if (err) return cb(err)
+
         jobs.forEach(function (job, i) {
           if (!job) return
           if (job) job = json(job)
@@ -257,6 +254,7 @@ module.exports = function (opts, workfn) {
           // if the data entries are deleted we can't ignore the matching items in the set.
           // otherwise we'll get an error state where we wont contiue processing anything ever again.
           client.zrem(prefix + ':set', data, function (err) {
+            if (err) queue.emit('log', 'error cleaning queue zset. data still corrupted. ' + err)
             // if err, and in this state we are up a creek
             cb(null, [])
           })
@@ -267,6 +265,4 @@ module.exports = function (opts, workfn) {
       })
     })
   }
-
-
 }
