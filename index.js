@@ -64,6 +64,7 @@ module.exports = function (opts, workfn) {
     ended = true
     if (!active && !processing) client.quit()
     client = false
+    queue.client = false
   }
 
   queue.has = function (name, cb) {
