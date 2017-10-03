@@ -3,6 +3,7 @@ var attempts = require('./lib/attempts')
 var idleTimer = require('./lib/idle-timer')
 var json = require('./lib/json')
 var once = require('once')
+var lock = require('./lib/lock')
 
 var EE = require('events').EventEmitter
 
@@ -46,13 +47,17 @@ module.exports = function (opts, workfn) {
 
   var queue = new EE()
   queue.add = function (name, data, cb) {
-    var multi = client.multi([
-      ['zadd', prefix + ':set', Date.now(), name],
-      ['hset', prefix + ':data', name, JSON.stringify({name: name, data: data})]
-    ])
-    multi.exec(function (err) {
-      assignWork()
-      cb(err)
+
+    lock(name,function(unlock){
+      var multi = client.multi([
+        ['zadd', prefix + ':set', Date.now(), name],
+        ['hset', prefix + ':data', name, JSON.stringify({name: name, data: data})]
+      ])
+      multi.exec(function (err) {
+        unlock()
+        assignWork()
+        cb(err)
+      })
     })
   }
 
@@ -62,6 +67,16 @@ module.exports = function (opts, workfn) {
     client = false
   }
 
+
+  queue.has = function(name,cb){
+    lock(name,function(unlock){
+      hget(prefix + ':data',function(err,data){
+        unlock()
+        cb(err,!!data)
+      })
+    })
+  }
+
   queue.start = function () {
     ended = false
     if (!client) {
@@ -69,6 +84,27 @@ module.exports = function (opts, workfn) {
       queue.client = client
     }
     assignWork()
+  }
+
+  queue.countFailures = function(cb){
+    queue.client.hlen(prefix+':failed',cb)
+  }
+
+  queue.getFailures = function(cb){
+    queue.client.hgetall(prefix+':failed',function(err,all){
+      if(err) return cb(err)
+      var res = []
+      Object.keys(all).forEach(function(k){
+        var o = json(all[k])
+        o._key = k
+        if(o) res.push(o)
+      })
+      cb(false,res)
+    })
+  }
+
+  queue.removeFailure = function(key,cb){
+    queue.client.hdel(prefix+':failed',key,cb) 
   }
 
   queue.client = client
@@ -96,7 +132,6 @@ module.exports = function (opts, workfn) {
     if (processing) return
     processing = true
 
-
     getJobs(toAssign, function (err, jobs) {
       processing = false
       if (err) {
@@ -108,7 +143,6 @@ module.exports = function (opts, workfn) {
 
       var start = Date.now()
 
-
       if(!jobs.length) {
         queue.emit('idle')
       }
@@ -116,6 +150,7 @@ module.exports = function (opts, workfn) {
       active += jobs.length
       jobs.forEach(function (job) {
         activeKeys[job.name] = 1
+        var timer
         var next = once(function (err) {
           if (timer) timer.clear()
 
@@ -136,36 +171,53 @@ module.exports = function (opts, workfn) {
         // invalid json
         if (!job) return next()
 
-        var timer
-        attempts(numAttempts, function (done) {
-          if (timer) timer.clear()
-          if (opts.timeout) {
-            timer = idleTimer(() => {
-              done(new Error('timeout. no callback after ' + opts.timeout + ' ms'))
-            }, opts.timeout)
-          }
-          workfn(job, function (err, data) {
-            done(err, data)
-          })
-        }, function (err) {
+        lock(job.name,function(unlock){
+          var timer
+          attempts(numAttempts, function (done) {
+            if (timer) timer.clear()
+            if (opts.timeout) {
+              timer = idleTimer(() => {
+                done(new Error('timeout. no callback after ' + opts.timeout + ' ms'))
+              }, opts.timeout)
+            }
+            workfn(job, function (err, data) {
+              done(err, data)
+            })
+          }, function (err) {
 
-          if (timer) timer.clear()
-          var multi = client.multi()
-          if (err) {
-            multi.zadd(prefix + ':error', Date.now(), job.name)
-            multi.zrem(prefix + ':set', job.name)
-          } else {
+            if (timer) timer.clear()
+            var multi = client.multi()
+            if (err) {
+              queue.emit('metric', {name: 'job-failed'})
+              multi.hset(prefix + ':failed', Date.now()+':'+job.name,JSON.stringify(job))
+            }
+
             multi.hdel(prefix + ':data', job.name)
             multi.zrem(prefix + ':set', job.name)
+            
 
-          }
+            var saveJobResult = () => {
+              multi.exec(function (err) {
+                if(err) queue.emit('metric', {name: 'redis-command-error'})
+                // if we get an error here we may continue to try and process this same set of jobs forever.
+                unlock()
+                next(err)
+              })
+            }
 
-          multi.exec(function (err) {
-            queue.emit('metric', {name: 'redis-command-error'})
-            // if we get an error here we may continue to try and process this same set of jobs forever.
-            next(err)
+            if(err) {
+              queue.emit('fail',{job:job,time:Date.now(),error:err})
+              if(opts.failHandler){
+                return opts.failHandler({job:job,time:Date.now(),error:err},function(){
+                  saveJobResult() 
+                })
+              }
+            }
+
+            saveJobResult()
           })
         })
+
       })
     })
   }
@@ -176,8 +228,8 @@ module.exports = function (opts, workfn) {
     client.zrange(prefix + ':set', start, end, function (err, data) {
       if (err) return cb(err)
 
-      // because there is a race condition in adding items and removeing them as far as keeping track of the range we have to 
-      // remove errant active items from the list.
+      // because there is a race condition in adding items and removing them as far as keeping track of the range we have to 
+      // remove active items from the list.
       var filtered = []
       data.forEach(function(k){
         if(!activeKeys[k]) filtered.push(k)
@@ -215,4 +267,6 @@ module.exports = function (opts, workfn) {
       })
     })
   }
+
+
 }
