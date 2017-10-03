@@ -185,33 +185,23 @@ module.exports = function (opts, workfn) {
           }, function (err) {
             if (timer) timer.clear()
             var multi = client.multi()
+            var failObj
             if (err) {
+              failObj = {job: job, time: Date.now(), error: err, _key: Date.now() + ':' + job.name}
               queue.emit('metric', {name: 'job-failed'})
-              multi.hset(prefix + ':failed', Date.now() + ':' + job.name, JSON.stringify(job))
+              multi.hset(prefix + ':failed', failObj._key, JSON.stringify(failObj))
             }
 
             multi.hdel(prefix + ':data', job.name)
             multi.zrem(prefix + ':set', job.name)
 
-            var saveJobResult = () => {
-              multi.exec(function (err) {
-                if (err) queue.emit('metric', {name: 'redis-command-error'})
-                // if we get an error here we may continue to try and process this same set of jobs forever.
-                unlock()
-                next(err)
-              })
-            }
-
-            if (err) {
-              queue.emit('fail', {job: job, time: Date.now(), error: err})
-              if (opts.failHandler) {
-                return opts.failHandler({job: job, time: Date.now(), error: err}, function () {
-                  saveJobResult()
-                })
-              }
-            }
-
-            saveJobResult()
+            multi.exec(function (err) {
+              if (err) queue.emit('metric', {name: 'redis-command-error'})
+              queue.emit('fail', failObj)
+              // if we get an error here we may continue to try and process this same set of jobs forever.
+              unlock()
+              next(err)
+            })
           })
         })
       })
