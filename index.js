@@ -43,11 +43,13 @@ module.exports = function (opts, workfn) {
   var activeKeys = {}
   var active = 0
 
+  var locks = {}
+
   // var readOnlyInterval
 
   var queue = new EE()
   queue.add = function (name, data, cb) {
-    lock(name, function (unlock) {
+    lock(locks, name, function (unlock) {
       var multi = client.multi([
         ['zadd', prefix + ':set', Date.now(), name],
         ['hset', prefix + ':data', name, JSON.stringify({name: name, data: data})]
@@ -68,11 +70,8 @@ module.exports = function (opts, workfn) {
   }
 
   queue.has = function (name, cb) {
-    lock(name, function (unlock) {
-      client.hget(prefix + ':data', function (err, data) {
-        unlock()
-        cb(err, !!data)
-      })
+    client.hget(prefix + ':data', function (err, data) {
+      cb(err, !!data)
     })
   }
 
@@ -170,7 +169,7 @@ module.exports = function (opts, workfn) {
         // invalid json
         if (!job) return next()
 
-        lock(job.name, function (unlock) {
+        lock(locks, job.name, function (unlock) {
           var timer
           attempts(numAttempts, function (done) {
             if (timer) timer.clear()
