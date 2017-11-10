@@ -77,12 +77,13 @@ queue.add('name',{a:1})
   - return
     - an event emitter `queue`
 
-- queue.add(name,data[,delay],cb)
+- `queue.add(name,data[,delay],cb)`
   - add a new job to the queue. 
   - optional time delay
 
-- queue.has(name,cb)
+- `queue.has(name,cb)`
   - if this queue has an entry for this name
+
 - `queue.start()`
   - start a stopped queue
   - this is needed if `options.start` is not truthy or you called `queue.end` and want to continue
