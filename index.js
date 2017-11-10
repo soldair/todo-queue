@@ -15,7 +15,7 @@ module.exports = function (opts, workfn) {
 
   var numAttempts = opts.attempts || 3
   var timeout = opts.timeout || 0
-  var prefix = opts.prefix|| opts.name
+  var prefix = opts.prefix || opts.name
   var client = redis.createClient(opts.redis)
 
   // assume we will connect.
@@ -47,13 +47,13 @@ module.exports = function (opts, workfn) {
 
   var queue = new EE()
   queue.add = function (name, data, delay, cb) {
-    if(typeof delay === 'function'){
+    if (typeof delay === 'function') {
       cb = delay
       delay = 0
     }
     lock(locks, name, function (unlock) {
       var multi = client.multi([
-        ['zadd', prefix + ':set', ts()+(delay||0) * 10000, name],
+        ['zadd', prefix + ':set', ts() + (delay || 0) * 10000, name],
         ['hset', prefix + ':data', name, JSON.stringify({name: name, data: data})]
       ])
       multi.exec(function (err) {
@@ -129,10 +129,9 @@ module.exports = function (opts, workfn) {
   }
 
   // use provided backoff function or default to minutes * attempts * 2
-  queue.backoff = opts.backoff || function(job){
+  queue.backoff = opts.backoff || function (job) {
     return (1000 * 60 * job._attempts) * 2
   }
-
 
   queue.client = client
 
@@ -210,13 +209,10 @@ module.exports = function (opts, workfn) {
             var multi = client.multi()
             var failObj
             if (err && (!job._attempts || job._attempts <= 5)) {
-
-              console.log('we need to schedule this for the future!')
-              
               job._attempts = (job._attempts || 0) + 1
               // add item back in with backoff _attempts+minutes backoff
               // 2,4,6,8,10 minutes. it'll take 40 minutes to give up on an item.
-              var delay = queue.backoff(job) 
+              var delay = queue.backoff(job)
 
               multi.zadd(prefix + ':set', (ts() + delay) * 10000, job.name)
               // update data to have attempts
@@ -231,13 +227,12 @@ module.exports = function (opts, workfn) {
               multi.hdel(prefix + ':data', job.name)
               multi.zrem(prefix + ':set', job.name)
             } else {
-              console.log('removing ', job.name, ' from set')
               multi.hdel(prefix + ':data', job.name)
               multi.zrem(prefix + ':set', job.name)
             }
             multi.exec(function (err) {
               if (err) queue.emit('metric', {name: 'redis-command-error'})
-              if (fail) queue.emit('fail', failObj)
+              if (failObj) queue.emit('fail', failObj)
               // if we get an error here we may continue to try and process this same set of jobs forever.
               unlock()
               next(err)
