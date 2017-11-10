@@ -4,6 +4,8 @@ var idleTimer = require('./lib/idle-timer')
 var json = require('./lib/json')
 var once = require('once')
 var lock = require('./lib/lock')
+var ts = require('monotonic-timestamp')
+var range = require('./lib/range')
 
 var EE = require('events').EventEmitter
 
@@ -13,9 +15,7 @@ module.exports = function (opts, workfn) {
 
   var numAttempts = opts.attempts || 3
   var timeout = opts.timeout || 0
-  var prefix = opts.prefix
-  // opts.writeOnly
-  //
+  var prefix = opts.prefix|| opts.name
   var client = redis.createClient(opts.redis)
 
   // assume we will connect.
@@ -45,32 +45,49 @@ module.exports = function (opts, workfn) {
 
   var locks = {}
 
-  // var readOnlyInterval
-
   var queue = new EE()
-  queue.add = function (name, data, cb) {
+  queue.add = function (name, data, delay, cb) {
+    if(typeof delay === 'function'){
+      cb = delay
+      delay = 0
+    }
     lock(locks, name, function (unlock) {
       var multi = client.multi([
-        ['zadd', prefix + ':set', Date.now(), name],
+        ['zadd', prefix + ':set', ts()+(delay||0) * 10000, name],
         ['hset', prefix + ':data', name, JSON.stringify({name: name, data: data})]
       ])
       multi.exec(function (err) {
         unlock()
         assignWork()
-        cb(err)
+        if (cb) cb(err)
       })
     })
   }
 
   queue.end = function () {
     ended = true
+    clearTimeout(queue.timer)
+    queue.timer = null
     if (!active && !processing) client.quit()
     client = false
     queue.client = false
   }
 
+  // returns the number of queued locks for a name.
+  //
+  // this is used to determine if the key has a pending
+  // modification while you are processing an item
+  //
+  // lets say you upload files from this queue. and the files get frequent modifications.
+  // if queue.locks(name) >= 2 when you are done working on an item the file on disk may
+  // not be the version you uploaded anymore.
+  //
+  queue.locks = function (name) {
+    return (locks[name] || []).length
+  }
+
   queue.has = function (name, cb) {
-    client.hget(prefix + ':data', function (err, data) {
+    client.hget(prefix + ':data', name, function (err, data) {
       cb(err, !!data)
     })
   }
@@ -81,6 +98,12 @@ module.exports = function (opts, workfn) {
       client = redis.createClient(opts.redis)
       queue.client = client
     }
+
+    // because we now support writing data to a future timestamp for later processing
+    // changes in time need to trigger work assignment.
+    clearTimeout(queue.timer)
+    queue.timer = setInterval(assignWork, 1000)
+
     assignWork()
   }
 
@@ -105,17 +128,18 @@ module.exports = function (opts, workfn) {
     queue.client.hdel(prefix + ':failed', key, cb)
   }
 
+  // use provided backoff function or default to minutes * attempts * 2
+  queue.backoff = opts.backoff || function(job){
+    return (1000 * 60 * job._attempts) * 2
+  }
+
+
   queue.client = client
 
   // if we are write only we dont start
   if (!opts.writeOnly || opts.start !== false) {
-    assignWork()
+    queue.start()
   }
-
-  // if this is a read only process we have to poll for new messages when we are idle.
-  // if(opts.readOnly) {
-  //  setInterval(assignWork,1000)
-  // }
 
   return queue
 
@@ -185,18 +209,35 @@ module.exports = function (opts, workfn) {
             if (timer) timer.clear()
             var multi = client.multi()
             var failObj
-            if (err) {
-              failObj = {job: job, time: Date.now(), error: err, _key: Date.now() + ':' + job.name}
+            if (err && (!job._attempts || job._attempts <= 5)) {
+
+              console.log('we need to schedule this for the future!')
+              
+              job._attempts = (job._attempts || 0) + 1
+              // add item back in with backoff _attempts+minutes backoff
+              // 2,4,6,8,10 minutes. it'll take 40 minutes to give up on an item.
+              var delay = queue.backoff(job) 
+
+              multi.zadd(prefix + ':set', (ts() + delay) * 10000, job.name)
+              // update data to have attempts
+              multi.hset(prefix + ':data', job.name, JSON.stringify(job))
+              queue.emit('metric', {name: 'job-retry'})
+            } else if (err) {
+              // failed too many times.
+              failObj = {job: job, time: Date.now(), error: err, _key: ts() + ':' + job.name}
               queue.emit('metric', {name: 'job-failed'})
               multi.hset(prefix + ':failed', failObj._key, JSON.stringify(failObj))
+              // remove from queue.
+              multi.hdel(prefix + ':data', job.name)
+              multi.zrem(prefix + ':set', job.name)
+            } else {
+              console.log('removing ', job.name, ' from set')
+              multi.hdel(prefix + ':data', job.name)
+              multi.zrem(prefix + ':set', job.name)
             }
-
-            multi.hdel(prefix + ':data', job.name)
-            multi.zrem(prefix + ':set', job.name)
-
             multi.exec(function (err) {
               if (err) queue.emit('metric', {name: 'redis-command-error'})
-              queue.emit('fail', failObj)
+              if (fail) queue.emit('fail', failObj)
               // if we get an error here we may continue to try and process this same set of jobs forever.
               unlock()
               next(err)
@@ -208,25 +249,23 @@ module.exports = function (opts, workfn) {
   }
 
   function getJobs (num, cb) {
-    var start = active
-    var end = active + num
-    client.zrange(prefix + ':set', start, end, function (err, data) {
+    // always load all older jobs. ignore jobs that are active.
+
+    range(client, prefix + ':set', 0, max, function (err, data) {
       if (err) return cb(err)
 
-      // because there is a race condition in adding items and removing them as far as keeping track of the range we have to
-      // remove active items from the list.
-      var filtered = []
-      data.forEach(function (k) {
-        if (!activeKeys[k]) filtered.push(k)
+      var keys = []
+      data.forEach(function (o) {
+        // in the case of a duplicate timestamp as a score we may
+        if (activeKeys[o.id]) return
+        keys.push(o.id)
       })
-
-      data = filtered
 
       if (!data.length) {
         return cb(null, [])
       }
 
-      client.hmget(prefix + ':data', data, function (err, jobs) {
+      client.hmget(prefix + ':data', keys, function (err, jobs) {
         if (err) return cb(err)
 
         jobs.forEach(function (job, i) {
@@ -243,7 +282,7 @@ module.exports = function (opts, workfn) {
           // should only hit this if the lists are corrupted. items are in the set but not in the map.
           // if the data entries are deleted we can't ignore the matching items in the set.
           // otherwise we'll get an error state where we wont contiue processing anything ever again.
-          client.zrem(prefix + ':set', data, function (err) {
+          client.zrem(prefix + ':set', keys, function (err) {
             if (err) queue.emit('log', 'error cleaning queue zset. data still corrupted. ' + err)
             // if err, and in this state we are up a creek
             cb(null, [])
