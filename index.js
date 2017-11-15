@@ -115,7 +115,7 @@ module.exports = function (opts, workfn) {
     queue.client.hgetall(prefix + ':failed', function (err, all) {
       if (err) return cb(err)
       var res = []
-      Object.keys(all).forEach(function (k) {
+      Object.keys(all||{}).forEach(function (k) {
         var o = json(all[k])
         o._key = k
         if (o) res.push(o)
