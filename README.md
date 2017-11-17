@@ -70,9 +70,10 @@ queue.add('name',{a:1})
       - is an object with name and data properties 
       - `{name: job name, data: the data you passed into add}`
 
-    - done(err)
+    - done(err, data, skip)
       - fire this callback when you are done with the job
       - if you callback with `err` the job will be retried depending on your settings for `attempts` and `retries`
+      - if you callback with skip set to true and this job has errored it will not be retried or attempted again.
 
   - return
     - an event emitter `queue`

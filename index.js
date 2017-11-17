@@ -13,7 +13,8 @@ module.exports = function (opts, workfn) {
   opts = opts || {}
   if (typeof opts === 'string') opts = {prefix: opts}
 
-  var numAttempts = opts.attempts || 3
+  opts.attempts = opts.attempts === undefined ? 5 : opts.attempts
+  var numAttempts = opts.retry || 3
   var timeout = opts.timeout || 0
   var prefix = opts.prefix || opts.name
   var client = redis.createClient(opts.redis)
@@ -115,7 +116,7 @@ module.exports = function (opts, workfn) {
     queue.client.hgetall(prefix + ':failed', function (err, all) {
       if (err) return cb(err)
       var res = []
-      Object.keys(all||{}).forEach(function (k) {
+      Object.keys(all || {}).forEach(function (k) {
         var o = json(all[k])
         o._key = k
         if (o) res.push(o)
@@ -201,14 +202,15 @@ module.exports = function (opts, workfn) {
                 done(new Error('timeout. no callback after ' + opts.timeout + ' ms'))
               }, timeout)
             }
-            workfn(job, function (err, data) {
-              done(err, data)
+            workfn(job, function (err, data, skip) {
+              done(err, data, skip)
             })
-          }, function (err) {
+          }, function (err, _, skip) {
             if (timer) timer.clear()
             var multi = client.multi()
             var failObj
-            if (err && (!job._attempts || job._attempts <= 5)) {
+
+            if (err && !skip && opts.attempts && (!job._attempts || job._attempts <= opts.attempts)) {
               job._attempts = (job._attempts || 0) + 1
               // add item back in with backoff _attempts+minutes backoff
               // 2,4,6,8,10 minutes. it'll take 40 minutes to give up on an item.
@@ -230,6 +232,7 @@ module.exports = function (opts, workfn) {
               multi.hdel(prefix + ':data', job.name)
               multi.zrem(prefix + ':set', job.name)
             }
+
             multi.exec(function (err) {
               if (err) queue.emit('metric', {name: 'redis-command-error'})
               if (failObj) queue.emit('fail', failObj)
