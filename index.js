@@ -54,7 +54,7 @@ module.exports = function (opts, workfn) {
     }
     lock(locks, name, function (unlock) {
       var multi = client.multi([
-        ['zadd', prefix + ':set', ts() + (delay || 0) * 10000, name],
+        ['zadd', prefix + ':set', (ts() + (delay || 0)) * 10000, name],
         ['hset', prefix + ':data', name, JSON.stringify({name: name, data: data})]
       ])
       multi.exec(function (err) {
