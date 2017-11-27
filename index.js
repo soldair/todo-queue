@@ -69,7 +69,7 @@ module.exports = function (opts, workfn) {
     ended = true
     clearTimeout(queue.timer)
     queue.timer = null
-    if (!active && !processing) client.quit()
+    if (!active && !processing && client) client.quit()
     client = false
     queue.client = false
   }
