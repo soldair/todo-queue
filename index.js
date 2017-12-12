@@ -237,9 +237,11 @@ module.exports = function (opts, workfn) {
               if (err) queue.emit('metric', {name: 'redis-command-error'})
               if (failObj) queue.emit('fail', failObj)
               // if we get an error here we may continue to try and process this same set of jobs forever.
-              unlock()
               next(err)
             })
+
+            // we cant defer unlock otherwise things that monitor locks can observe locks that are about to be released. 
+            unlock()
           })
         })
       })
