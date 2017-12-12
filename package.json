@@ -1,6 +1,6 @@
 {
   "name": "todo-queue",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "queue work todo in redis and handle it in the same process. keep work safe from process restarts/crashes",
   "main": "index.js",
   "scripts": {
